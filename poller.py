@@ -11,7 +11,7 @@ Env vars required:
   SUPABASE_STAGING_SERVICE      - service role key
 
 Optional:
-  HERMES_MODEL                  - default 'openrouter/anthropic/claude-3.5-sonnet'
+  HERMES_MODEL                  - default 'minimax/minimax-m3:free' (free model on OpenRouter)
 """
 import os, sys, json, time, urllib.request, urllib.error, urllib.parse
 from datetime import datetime
