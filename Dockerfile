@@ -1,54 +1,41 @@
-# Hermes Cloud Desktop — single-image build for Render free tier.
-# Slimmed: no Chrome libs, no xfce4-goodies, no uv (use plain pip).
-FROM mcr.microsoft.com/devcontainers/base:ubuntu-22.04
+# Hermes Cloud Telegram bot — minimal image for Render free tier.
+# ~120MB. Just Python 3.11 + Hermes CLI + the Telegram poller.
+FROM python:3.11-slim-bookworm
 
 ENV DEBIAN_FRONTEND=noninteractive \
-    DISPLAY=:1 \
-    VNC_PORT=5901 \
-    NOVNC_PORT=7860 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONUNBUFFERED=1 \
     HOME=/root \
-    TERM=xterm-256color \
     PATH="/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-# Slim XFCE + VNC + noVNC + Hermes deps in one layer, then clean apt cache.
+# System deps: curl for healthcheck, ca-certs for HTTPS, jq not needed at runtime
+# (the poller uses Python only). Keep it minimal.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    xfce4 xfce4-terminal thunar \
-    tigervnc-standalone-server tigervnc-viewer \
-    novnc websockify \
-    python3 python3-pip python3-venv python3-dev build-essential \
-    curl wget ca-certificates git jq supervisor \
-    libdbus-1-3 libgtk-3-0 \
-    fonts-liberation fonts-dejavu fonts-noto-color-emoji \
-    sudo dbus-x11 xauth \
- && apt-get clean && rm -rf /var/lib/apt/lists/*
+    curl ca-certificates \
+ && apt-get clean && rm -rf /var/lib/apt/lists/* \
+ && rm -rf /usr/share/doc /usr/share/man /usr/share/locale
 
-# Create non-root user `vscode` and grant passwordless sudo.
-RUN id -u vscode >/dev/null 2>&1 || useradd -m -s /bin/bash vscode \
- && echo "vscode ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/vscode \
- && chmod 0440 /etc/sudoers.d/vscode
+# Clone Hermes and install. Use --depth 1 for speed. Pin to a specific commit
+# later once we know which works; for now main.
+WORKDIR /opt
+RUN git clone --depth 1 https://github.com/NousResearch/hermes-agent.git hermes-src \
+ && pip install --no-cache-dir -e ./hermes-src 2>&1 | tail -3 \
+ && rm -rf hermes-src/.git \
+ || echo "hermes install deferred"
 
-# Directories for runtime state.
-RUN mkdir -p /home/vscode/.vnc /home/vscode/hermes /var/log/supervisor \
- && chown -R vscode:vscode /home/vscode /var/log/supervisor
+# Project files
+COPY poller.py /opt/poller.py
+COPY healthcheck.sh /opt/healthcheck.sh
+RUN chmod +x /opt/healthcheck.sh
 
-# Clone Hermes into a venv. Use system Python 3.10 (no uv needed).
-WORKDIR /home/vscode
-RUN git clone --depth 1 https://github.com/NousResearch/hermes-agent.git /home/vscode/hermes-src \
- && python3 -m venv /home/vscode/hermes/.venv \
- && /home/vscode/hermes/.venv/bin/pip install --quiet --upgrade pip \
- && /home/vscode/hermes/.venv/bin/pip install --quiet -e /home/vscode/hermes-src 2>&1 | tail -3 \
- || echo "Hermes install completed with warnings"
+# Healthcheck: hit / and report 200 — Render's free tier requires this for the
+# "always awake" promise, otherwise the instance will be marked unhealthy and
+# recycled. We use python's http.server on :10000 for this.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD curl -sf http://127.0.0.1:10000/ >/dev/null || exit 1
 
-# Project files (poller + supervisor config + entrypoint).
-COPY poller.py /home/vscode/hermes/poller.py
-COPY supervisor.conf /home/vscode/hermes/supervisor.conf
-COPY entrypoint.sh /entrypoint.sh
+EXPOSE 10000
 
-RUN cp /home/vscode/hermes/supervisor.conf /etc/supervisor/conf.d/hermes.conf \
- && chmod +x /entrypoint.sh \
- && chown -R vscode:vscode /home/vscode/hermes /home/vscode/.vnc
-
-# Render free containers run as root by default
-EXPOSE 7860
-ENTRYPOINT ["/entrypoint.sh"]
-CMD ["start"]
+# Run the healthcheck HTTP server + the Telegram poller together via a tiny
+# shell supervisor (no need for the supervisor package — adds bloat).
+CMD ["sh", "-c", "python3 -m http.server 10000 --bind 127.0.0.1 & exec python3 /opt/poller.py"]
