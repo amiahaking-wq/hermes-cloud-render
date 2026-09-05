@@ -1,41 +1,33 @@
-# Hermes Cloud Telegram bot — minimal image for Render free tier.
-# ~120MB. Just Python 3.11 + Hermes CLI + the Telegram poller.
-FROM python:3.11-slim-bookworm
+# Hermes Cloud Telegram bot — TRULY minimal image for Render free tier.
+# No Hermes installation. The poller calls OpenRouter directly via urllib
+# (stdlib only). Target image: ~80MB compressed.
+FROM python:3.11-alpine
 
-ENV DEBIAN_FRONTEND=noninteractive \
+ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PYTHONUNBUFFERED=1 \
     HOME=/root \
     PATH="/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-# System deps: curl for healthcheck, ca-certs for HTTPS, jq not needed at runtime
-# (the poller uses Python only). Keep it minimal.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl ca-certificates \
- && apt-get clean && rm -rf /var/lib/apt/lists/* \
- && rm -rf /usr/share/doc /usr/share/man /usr/share/locale
+# Alpine ships with curl + ca-certificates already. Nothing else needed.
+# python:3.11-alpine is ~50MB base.
 
-# Clone Hermes and install. Use --depth 1 for speed. Pin to a specific commit
-# later once we know which works; for now main.
 WORKDIR /opt
-RUN git clone --depth 1 https://github.com/NousResearch/hermes-agent.git hermes-src \
- && pip install --no-cache-dir -e ./hermes-src 2>&1 | tail -3 \
- && rm -rf hermes-src/.git \
- || echo "hermes install deferred"
 
-# Project files
+# Poller uses urllib from stdlib — zero pip installs needed.
 COPY poller.py /opt/poller.py
 COPY healthcheck.sh /opt/healthcheck.sh
 RUN chmod +x /opt/healthcheck.sh
 
-# Healthcheck: hit / and report 200 — Render's free tier requires this for the
-# "always awake" promise, otherwise the instance will be marked unhealthy and
-# recycled. We use python's http.server on :10000 for this.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD curl -sf http://127.0.0.1:10000/ >/dev/null || exit 1
+# Tiny static "ok" page served by python http.server for Render's healthcheck.
+RUN mkdir -p /opt/www && printf 'hermes-telegram-bot: ok\n' > /opt/www/index.html
 
 EXPOSE 10000
 
-# Run the healthcheck HTTP server + the Telegram poller together via a tiny
-# shell supervisor (no need for the supervisor package — adds bloat).
-CMD ["sh", "-c", "python3 -m http.server 10000 --bind 127.0.0.1 & exec python3 /opt/poller.py"]
+# HTTP healthcheck on :10000 (for Render's "alive" probe) + Telegram poller.
+# Both run as the same container; the http server is tiny and just serves
+# the static index.html above. curl polls it every 10min via the poller's
+# keepalive loop (see /opt/poller.py).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD wget -q -O /dev/null http://127.0.0.1:10000/ || exit 1
+
+CMD ["sh", "-c", "cd /opt/www && python3 -m http.server 10000 --bind 0.0.0.0 & exec python3 /opt/poller.py"]
