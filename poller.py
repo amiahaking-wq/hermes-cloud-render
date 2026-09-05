@@ -18,7 +18,8 @@ from datetime import datetime
 
 # --- Config from env ---
 TG_TOKEN = os.environ["CLOUD_TELEGRAM_BOT_TOKEN"]
-OWNER_ID = int(os.environ["CLOUD_TELEGRAM_ID"])
+# Comma-separated list of allowed Telegram user IDs (e.g. "1234,5678")
+ALLOWED_IDS = {int(x) for x in os.environ["CLOUD_TELEGRAM_ID"].replace(",", " ").split() if x.strip()}
 MODEL = os.environ.get("HERMES_MODEL", "anthropic/claude-3.5-sonnet")
 SUPABASE_URL = os.environ["SUPABASE_STAGING_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_STAGING_SERVICE"]
@@ -128,12 +129,12 @@ def main():
                 text = msg.get("text", "").strip()
                 if not text:
                     continue
-                # Whitelist: only the owner.
-                if user_id != OWNER_ID:
+                # Whitelist: only allowed IDs (comma-separated in CLOUD_TELEGRAM_ID)
+                if user_id not in ALLOWED_IDS:
                     log(f"rejecting message from non-owner user_id={user_id}")
                     send_message(chat_id, "Not authorized. This bot is private.")
                     continue
-                log(f"msg from owner chat_id={chat_id}: {text[:80]!r}")
+                log(f"msg from allowed user_id={user_id} chat_id={chat_id}: {text[:80]!r}")
 
                 session = get_or_create_session("telegram", str(chat_id), label=msg["from"].get("username"))
                 if not session:
