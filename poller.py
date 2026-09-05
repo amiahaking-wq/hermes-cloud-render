@@ -1,30 +1,36 @@
 """Hermes Cloud Telegram poller.
 
-Polls Telegram for new messages, calls Hermes to generate a reply, sends the reply back.
+Polls Telegram for new messages, calls an LLM via NVIDIA NIM, sends the reply.
 Reads/writes session + message history to Supabase (public.hermes_cloud_* tables).
 
 Env vars required:
   CLOUD_TELEGRAM_BOT_TOKEN      - Telegram bot token
-  CLOUD_TELEGRAM_ID             - numeric user id of owner (whitelist; others ignored)
-  OPENROUTER_API_KEY            - for the LLM
+  CLOUD_TELEGRAM_ID             - comma-separated numeric user ids (whitelist)
+  NVIDIA_API_KEY                - NVIDIA NIM API key (include "Bearer " prefix if you like)
   SUPABASE_STAGING_URL          - https://<ref>.supabase.co
   SUPABASE_STAGING_SERVICE      - service role key
 
 Optional:
-  HERMES_MODEL                  - default 'minimax/minimax-m3:free' (free model on OpenRouter)
+  HERMES_MODEL                  - default 'moonshotai/kimi-k3' (NVIDIA NIM)
+  NVIDIA_BASE_URL               - default 'https://integrate.api.nvidia.com/v1'
 """
 import os, sys, json, time, urllib.request, urllib.error, urllib.parse
 from datetime import datetime
 
 # --- Config from env ---
 TG_TOKEN = os.environ["CLOUD_TELEGRAM_BOT_TOKEN"]
-# Comma-separated list of allowed Telegram user IDs (e.g. "1234,5678")
 ALLOWED_IDS = {int(x) for x in os.environ["CLOUD_TELEGRAM_ID"].replace(",", " ").split() if x.strip()}
-MODEL = os.environ.get("HERMES_MODEL", "minimax/minimax-m3:free")
+NVIDIA_KEY = os.environ["NVIDIA_API_KEY"]
+# If user stored the value with a "Bearer " prefix, strip it because we add it ourselves.
+if NVIDIA_KEY.lower().startswith("bearer "):
+    NVIDIA_KEY = NVIDIA_KEY[7:].strip()
+MODEL = os.environ.get("HERMES_MODEL", "moonshotai/kimi-k3")
+BASE_URL = os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1").rstrip("/")
 SUPABASE_URL = os.environ["SUPABASE_STAGING_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_STAGING_SERVICE"]
 
 TG_API = f"https://api.telegram.org/bot{TG_TOKEN}"
+NVIDIA_CHAT_URL = f"{BASE_URL}/chat/completions"
 
 def log(*a):
     print(f"[{datetime.utcnow().isoformat()}Z]", *a, flush=True)
@@ -47,12 +53,10 @@ def sb(method, path, body=None):
         return {"error": e.read().decode()[:500]}, e.code
 
 def get_or_create_session(channel, external_id, label=None):
-    # Try insert; on conflict, fetch existing.
     body = {"channel": channel, "external_id": external_id, "user_label": label}
     rows, code = sb("POST", "hermes_cloud_sessions?on_conflict=channel,external_id", body)
     if code in (200, 201) and rows:
         return rows[0]
-    # If conflict, fetch.
     enc = urllib.parse.quote(external_id, safe="")
     rows, _ = sb("GET", f"hermes_cloud_sessions?channel=eq.{channel}&external_id=eq.{enc}&select=*")
     return rows[0] if rows else None
@@ -84,33 +88,33 @@ def send_message(chat_id, text):
     for i in range(0, len(text), 4000):
         tg("sendMessage", chat_id=chat_id, text=text[i:i+4000], parse_mode="")
 
-# --- Hermes reply (via OpenRouter direct — Hermes gateway would also work but adds latency) ---
-def call_openrouter(messages):
-    key = os.environ["OPENROUTER_API_KEY"]
-    url = "https://openrouter.ai/api/v1/chat/completions"
+# --- LLM (NVIDIA NIM, OpenAI-compatible /v1/chat/completions) ---
+def call_llm(messages):
     body = {
         "model": MODEL,
         "messages": messages,
-        "max_tokens": 1500,
+        "max_tokens": 1024,
         "temperature": 0.7,
+        "stream": False,
     }
-    req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST", headers={
-        "Authorization": f"Bearer {key}",
+    req = urllib.request.Request(NVIDIA_CHAT_URL, data=json.dumps(body).encode(), method="POST", headers={
+        "Authorization": f"Bearer {NVIDIA_KEY}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://huggingface.co/spaces/Amiahhhhh/hermes-cloud",
+        "Accept": "application/json",
     })
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
             d = json.loads(r.read())
-            return d["choices"][0]["message"]["content"], d.get("usage", {}).get("total_tokens")
+            content = d["choices"][0]["message"]["content"]
+            return content, d.get("usage", {}).get("total_tokens")
     except urllib.error.HTTPError as e:
-        return f"[OpenRouter error: {e.code}] {e.read().decode()[:200]}", None
+        return f"[NVIDIA error: {e.code}] {e.read().decode()[:200]}", None
     except Exception as e:
-        return f"[OpenRouter exception: {type(e).__name__}: {e}]", None
+        return f"[NVIDIA exception: {type(e).__name__}: {e}]", None
 
 # --- Main loop ---
 def main():
-    log("poller starting; model=", MODEL)
+    log(f"poller starting; model={MODEL} base={BASE_URL}")
     last_update_id = 0
     while True:
         try:
@@ -129,7 +133,6 @@ def main():
                 text = msg.get("text", "").strip()
                 if not text:
                     continue
-                # Whitelist: only allowed IDs (comma-separated in CLOUD_TELEGRAM_ID)
                 if user_id not in ALLOWED_IDS:
                     log(f"rejecting message from non-owner user_id={user_id}")
                     send_message(chat_id, "Not authorized. This bot is private.")
@@ -142,11 +145,10 @@ def main():
                     continue
                 sid = session["id"]
 
-                # Persist user msg, fetch history, call LLM, persist reply, send.
                 append_message(sid, "user", text)
                 history = fetch_history(sid, limit=20)
                 msgs = [{"role": m["role"], "content": m["content"]} for m in history if m["role"] in ("user","assistant","system")]
-                reply, tokens = call_openrouter(msgs)
+                reply, tokens = call_llm(msgs)
                 append_message(sid, "assistant", reply, model=MODEL, tokens=tokens)
                 touch_session(sid)
                 send_message(chat_id, reply)
