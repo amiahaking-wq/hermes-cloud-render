@@ -10,8 +10,9 @@ set +e  # don't bail on transient failures during boot
 VNCPASS="${VNCPASS:-hermes-cloud-default}"
 echo "[entrypoint] starting; VNCPASS length=${#VNCPASS}; user=$(whoami)"
 
+# Ensure vscode owns its home
 mkdir -p /home/vscode/.vnc /var/log/supervisor
-chown -R vscode:vscode /home/vscode/.vnc 2>/dev/null
+chown -R vscode:vscode /home/vscode 2>/dev/null || true
 
 # VNC password
 printf '%s' "$VNCPASS" | vncpasswd -f > /home/vscode/.vnc/passwd
