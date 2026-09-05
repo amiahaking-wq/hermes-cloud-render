@@ -20,7 +20,7 @@ from datetime import datetime
 TG_TOKEN = os.environ["CLOUD_TELEGRAM_BOT_TOKEN"]
 # Comma-separated list of allowed Telegram user IDs (e.g. "1234,5678")
 ALLOWED_IDS = {int(x) for x in os.environ["CLOUD_TELEGRAM_ID"].replace(",", " ").split() if x.strip()}
-MODEL = os.environ.get("HERMES_MODEL", "anthropic/claude-3.5-sonnet")
+MODEL = os.environ.get("HERMES_MODEL", "minimax/minimax-m3:free")
 SUPABASE_URL = os.environ["SUPABASE_STAGING_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_STAGING_SERVICE"]
 
