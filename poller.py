@@ -19,7 +19,7 @@ from datetime import datetime
 # --- Config from env ---
 TG_TOKEN = os.environ["CLOUD_TELEGRAM_BOT_TOKEN"]
 OWNER_ID = int(os.environ["CLOUD_TELEGRAM_ID"])
-MODEL = os.environ.get("HERMES_MODEL", "openrouter/anthropic/claude-3.5-sonnet")
+MODEL = os.environ.get("HERMES_MODEL", "anthropic/claude-3.5-sonnet")
 SUPABASE_URL = os.environ["SUPABASE_STAGING_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_STAGING_SERVICE"]
 
